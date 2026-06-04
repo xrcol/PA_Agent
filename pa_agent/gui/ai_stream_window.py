@@ -139,8 +139,13 @@ class AIStreamPanel(QWidget):
         if self._settings is not None:
             point_size = int(getattr(self._settings.general, "stream_pane_font_pt", 11) or 11)
         font = self._mono_font(point_size)
+        # setFont + document().setDefaultFont() ensures the font is applied
+        # immediately to both the widget and its text document layout,
+        # not just on the next content update.
         self._reasoning_edit.setFont(font)
+        self._reasoning_edit.document().setDefaultFont(font)
         self._input_edit.setFont(font)
+        self._input_edit.document().setDefaultFont(font)
 
     def _build_token_bar(self) -> QHBoxLayout:
         row = QHBoxLayout()

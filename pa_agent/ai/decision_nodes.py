@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 BAR_COUNT_THRESHOLD: int = 20           # §1.1 data sufficiency threshold
 
-DIRECTION_WINDOW: int = 20              # §2.3 direction voting window (short)
-DIRECTION_WINDOW_MED: int = 50         # §2.3 medium window for confirmation vote
+DIRECTION_WINDOW: int = 8               # §2.3 direction voting window (short) — 缩小到8根，重点捕捉近期结构突变
+DIRECTION_WINDOW_MED: int = 20         # §2.3 medium window for confirmation vote — 原20根窗口降为中窗口，50根太滞后
 
 ALWAYS_IN_WINDOW: int = 20             # §2.4 Always In window
 
@@ -571,29 +571,44 @@ def judge_direction(frame: Any) -> tuple[str, NodeFill]:
     except (TypeError, ValueError):
         pass
 
-    # ── Signal 2: Closing center of gravity (short window) ────────────────────
+    # ── Signal 2: Weighted closing center of gravity (short window) ─────────────
+    # 线性递减权重：bars[0]=最新(权重W)，bars[W-1]=最老(权重1)。
+    # 加权重心 = Σ(weight_i × close_i) / Σweight_i，近端与远端各占半窗口。
+    # 这样最近1~(W/2)根K线对结论的影响远大于较老的K线。
     s2 = 0
     s2_desc = "收盘重心:0"
     try:
         h = W // 2
         if h >= 1 and len(close_prices) >= 2 * h:
-            near_vals = [v for v in close_prices[:h] if not math.isnan(v)]
-            far_vals = [v for v in close_prices[h:2 * h] if not math.isnan(v)]
-            if near_vals and far_vals:
-                near = sum(near_vals) / len(near_vals)
-                far = sum(far_vals) / len(far_vals)
+            # 权重：index 0 最新 → 权重 W，index W-1 最老 → 权重 1
+            def _weighted_avg(vals: list[float], start_idx: int) -> float:
+                total_w = 0.0
+                total_wv = 0.0
+                for local_i, v in enumerate(vals):
+                    if math.isnan(v):
+                        continue
+                    w = W - (start_idx + local_i)  # newer bars get higher weight
+                    total_w += w
+                    total_wv += w * v
+                return total_wv / total_w if total_w > 0 else float("nan")
+
+            near_vals = close_prices[:h]
+            far_vals = close_prices[h:2 * h]
+            near = _weighted_avg(near_vals, 0)
+            far = _weighted_avg(far_vals, h)
+            if not math.isnan(near) and not math.isnan(far):
                 diff = near - far
                 thr2 = 0.0
                 if atr14 and len(atr14) >= 1 and not math.isnan(float(atr14[0])):
                     thr2 = 0.1 * float(atr14[0])
                 if diff > thr2:
                     s2 = 1
-                    s2_desc = f"收盘重心:+1(diff={diff:.4f}>thr={thr2:.4f})"
+                    s2_desc = f"收盘重心(加权):+1(diff={diff:.4f}>thr={thr2:.4f})"
                 elif diff < -thr2:
                     s2 = -1
-                    s2_desc = f"收盘重心:-1(diff={diff:.4f}<-thr={-thr2:.4f})"
+                    s2_desc = f"收盘重心(加权):-1(diff={diff:.4f}<-thr={-thr2:.4f})"
                 else:
-                    s2_desc = f"收盘重心:0(diff={diff:.4f},死区±{thr2:.4f})"
+                    s2_desc = f"收盘重心(加权):0(diff={diff:.4f},死区±{thr2:.4f})"
     except (TypeError, ValueError):
         pass
 
@@ -694,7 +709,8 @@ def judge_direction(frame: Any) -> tuple[str, NodeFill]:
     score = s1 + s2 + s3 + s4 + s5
 
     # ── Medium-window confirmation filter ────────────────────────────────────
-    # 50-bar closing gravity contradicts short-window → |score| reduced by 1.
+    # W_med-bar closing gravity (now 20 bars) contradicts short-window → |score| reduced by 1.
+    # Also uses linear-decay weighting so recent bars dominate.
     med_confirm = 0
     med_confirm_desc = "中窗口重心:0"
     try:
@@ -706,25 +722,38 @@ def judge_direction(frame: Any) -> tuple[str, NodeFill]:
                 close_prices_med.append(float("nan"))
         hm = W_med // 2
         if hm >= 1 and len(close_prices_med) >= 2 * hm:
-            near_m = [v for v in close_prices_med[:hm] if not math.isnan(v)]
-            far_m = [v for v in close_prices_med[hm:2 * hm] if not math.isnan(v)]
-            if near_m and far_m:
-                diff_m = sum(near_m) / len(near_m) - sum(far_m) / len(far_m)
+            def _weighted_avg_med(vals: list[float], start_idx: int) -> float:
+                total_w = 0.0
+                total_wv = 0.0
+                for local_i, v in enumerate(vals):
+                    if math.isnan(v):
+                        continue
+                    w = W_med - (start_idx + local_i)
+                    total_w += w
+                    total_wv += w * v
+                return total_wv / total_w if total_w > 0 else float("nan")
+
+            near_m_vals = close_prices_med[:hm]
+            far_m_vals = close_prices_med[hm:2 * hm]
+            near_m = _weighted_avg_med(near_m_vals, 0)
+            far_m = _weighted_avg_med(far_m_vals, hm)
+            if not math.isnan(near_m) and not math.isnan(far_m):
+                diff_m = near_m - far_m
                 thr_m = 0.0
                 if atr14 and len(atr14) >= 1 and not math.isnan(float(atr14[0])):
                     thr_m = 0.1 * float(atr14[0])
                 if diff_m > thr_m:
                     med_confirm = 1
                     med_confirm_desc = (
-                        f"中窗口重心:+1(diff={diff_m:.4f}>thr={thr_m:.4f},W={W_med})"
+                        f"中窗口重心(加权):+1(diff={diff_m:.4f}>thr={thr_m:.4f},W={W_med})"
                     )
                 elif diff_m < -thr_m:
                     med_confirm = -1
                     med_confirm_desc = (
-                        f"中窗口重心:-1(diff={diff_m:.4f}<-thr={-thr_m:.4f},W={W_med})"
+                        f"中窗口重心(加权):-1(diff={diff_m:.4f}<-thr={-thr_m:.4f},W={W_med})"
                     )
                 else:
-                    med_confirm_desc = f"中窗口重心:0(diff={diff_m:.4f},W={W_med})"
+                    med_confirm_desc = f"中窗口重心(加权):0(diff={diff_m:.4f},W={W_med})"
     except (TypeError, ValueError):
         pass
 

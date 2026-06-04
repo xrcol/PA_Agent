@@ -295,6 +295,21 @@ def normalize_stage1(
 ) -> dict[str, Any]:
     """Return a copy of *obj* with known AI quirks corrected."""
     out = copy.deepcopy(obj)
+
+    # ── Unwrap nested wrapper: {"meta": {...}, "stage1_diagnosis": { <actual> }} ──
+    # Models occasionally wrap the diagnosis inside a "stage1_diagnosis" key,
+    # or include extra top-level metadata fields alongside the diagnosis.
+    if "stage1_diagnosis" in out and isinstance(out["stage1_diagnosis"], dict):
+        inner = out["stage1_diagnosis"]
+        # Only unwrap if the inner dict has core diagnosis fields and the outer doesn't
+        if "cycle_position" in inner and "cycle_position" not in out:
+            # Merge inner into out, preserving any incremental_delta that may be at top level
+            delta_top = out.get("incremental_delta")
+            out = inner
+            if delta_top is not None and "incremental_delta" not in out:
+                out["incremental_delta"] = delta_top
+            logger.debug("Unwrapped stage1_diagnosis nested wrapper")
+
     lenient = normalization_mode == "lenient"
 
     # ── DecisionNodeEngine: fill §1.1/§2.3/§2.4 (before strategy_files routing) ──

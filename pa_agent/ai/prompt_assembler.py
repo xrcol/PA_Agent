@@ -265,7 +265,7 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
   "bar_analysis": {
     "always_in": "long|short|neutral",
     "last_closed_bar": "K1",
-    "bar_type": "trend_bull|trend_bear|doji|inside|outside_bull|outside_bear|flat|other",
+    "bar_type": "【必须与阶段一 bar_analysis.bar_type 完全一致，不得重新推断】trend_bull|trend_bear|doji|inside|outside_bull|outside_bear|flat|other",
     "signal_bar": {
       "bar": "K2 或 null（计划型挂单尚无已收盘信号棒时为 null）",
       "quality": "strong|medium|weak|invalid",
@@ -273,7 +273,6 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
       "reason": "信号棒质量判断"
     },
     "entry_bar": {
-      "bar": "K1 或 null（限价/突破挂单尚未触发时为 null）",
       "strength": "strong|weak|not_triggered",
       "follow_through": true,
       "still_valid": true,
@@ -309,6 +308,8 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 禁止写「部分符合」「部分是」「上涨通道」等；模糊或分类细节写在 **reason**（方向类节点可另填 **branch**）。
 
 **⚠️ diagnosis_summary.direction 与阶段一 direction 不一致时的强制规则：**
+
+**⚠️ bar_analysis.bar_type 强制规则：必须直接沿用阶段一 `bar_analysis.bar_type` 的值，禁止在阶段二重新推断或修改。** 阶段一几何特征表是程序的确定性计算结果，是权威来源。如果你认为 K1 的棒型与实际不符，可以在 reasoning 里说明，但 `bar_type` 字段必须等于阶段一给出的值。
 - `diagnosis_summary.direction` 必须与 `stage1.direction` **保持一致**，除非你在阶段二的 decision_trace 中以 **node_id="2.3"** 明确记录方向变更及原因。
 - **例外（无需 2.3 节点）**：
   - 阶段一 direction=**neutral** → 阶段二 direction=bullish/bearish：程序判不了方向时 AI 阶段二识别出方向属于正常补充，校验器已尅5豪免。不强制补写 2.3，但建议补（给本人看更清晰）。

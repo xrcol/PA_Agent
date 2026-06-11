@@ -68,10 +68,25 @@ def _is_deepseek_native(base_url: str) -> bool:
 
 
 def _is_deepseek_model(model: str) -> bool:
-    """Check if the model name indicates a DeepSeek model (e.g. deepseek-v4-pro),
-    or if it's 'openclaw' which routes to pool-deepseek-v4-flash."""
+    """True for DeepSeek model ids; excludes QClaw ``openclaw`` Agent alias."""
     m = (model or "").lower()
-    return "deepseek" in m or m == "openclaw"
+    if m == "openclaw":
+        return False
+    return "deepseek" in m
+
+
+def _is_qclaw_openclaw_agent(settings: AIProviderSettings) -> bool:
+    """True when requests go through QClaw's public-gateway OpenClaw Agent."""
+    from pa_agent.ai.qclaw_connector import detect_qclaw, is_openclaw_model
+
+    return bool(is_openclaw_model(settings.model) and detect_qclaw())
+
+
+def _openclaw_agent_request_extra(settings: AIProviderSettings) -> dict[str, Any]:
+    """Ask QClaw Agent to answer in-chat only (no exec/write tool loop)."""
+    if not _is_qclaw_openclaw_agent(settings):
+        return {}
+    return {"tool_choice": "none"}
 
 
 def _is_kkai_openai_proxy(base_url: str) -> bool:
@@ -311,6 +326,7 @@ class DeepSeekClient:
         extra_body, _effort = _resolve_thinking_params(
             self._settings, thinking=thinking, reasoning_effort=reasoning_effort
         )
+        extra_body = {**extra_body, **_openclaw_agent_request_extra(self._settings)}
         api_messages, system_param = _prepare_chat_messages(self._settings, messages)
         if system_param:
             extra_body = {**extra_body, "system": system_param}
@@ -473,6 +489,7 @@ class DeepSeekClient:
         extra_body, _effort = _resolve_thinking_params(
             self._settings, thinking=thinking, reasoning_effort=reasoning_effort
         )
+        extra_body = {**extra_body, **_openclaw_agent_request_extra(self._settings)}
         api_messages, system_param = _prepare_chat_messages(self._settings, messages)
         if system_param:
             extra_body = {**extra_body, "system": system_param}

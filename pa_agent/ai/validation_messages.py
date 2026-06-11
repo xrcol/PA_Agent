@@ -17,6 +17,9 @@ _PREFIX_RULES: tuple[tuple[str, str], ...] = (
     ("bar_by_bar", "【逐棒摘要】"),
     ("diagnosis_summary", "【诊断摘要】"),
     ("order_direction", "【下单方向】"),
+    ("always_in", "【AIL状态】"),
+    ("terminal.outcome", "【终局结果】"),
+    ("terminal", "【终局】"),
     ("placing an order", "【下单规则】"),
     ("incremental", "【增量分析】"),
 )

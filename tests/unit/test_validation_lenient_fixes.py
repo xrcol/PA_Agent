@@ -132,3 +132,47 @@ def test_lenient_validator_maps_expired_freshness_on_pending_entry() -> None:
     )
     assert isinstance(result, Ok), result
     assert result.obj["bar_analysis"]["entry_bar"]["freshness"] == "pending"
+
+
+def test_lenient_validator_maps_openclaw_enum_slips() -> None:
+    """OpenClaw agent often mixes stage1 English enums into stage2 fields."""
+    from pa_agent.ai.stage2_normalizer import _normalize_stage2_enum_aliases
+
+    obj = _stage2_trade_obj(
+        order_type="突破单",
+        order_direction="bearish",
+        entry_price=99.99,
+        take_profit_price=95.0,
+        stop_loss_price=104.01,
+        entry_basis_bar="K1",
+        entry_basis_extreme="low",
+        entry_rule="K1低点下方1跳动",
+        estimated_win_rate=60,
+    )
+    obj["diagnosis_summary"]["direction"] = "bearish"
+    obj["bar_analysis"]["bar_type"] = "trend_bear"
+    obj["bar_analysis"]["always_in"] = "AIL (失效中)"
+    obj["bar_analysis"]["entry_bar"] = {
+        "strength": "pending",
+        "follow_through": False,
+        "still_valid": True,
+        "freshness": "fresh",
+    }
+    obj["terminal"] = {
+        "node_id": "11.4",
+        "outcome": "breakout_entry",
+        "label": "§11.4突破单-空头延续",
+    }
+    assert _normalize_stage2_enum_aliases(obj) is True
+    assert obj["decision"]["order_direction"] == "做空"
+    assert obj["bar_analysis"]["always_in"] == "neutral"
+    assert obj["terminal"]["outcome"] == "trade"
+    assert obj["bar_analysis"]["entry_bar"]["strength"] == "not_triggered"
+
+    result = validator.validate(
+        "stage2",
+        json.dumps(obj),
+        decision_stance="extreme_aggressive",
+        kline_frame=_frame(),
+    )
+    assert isinstance(result, Ok), result

@@ -62,6 +62,20 @@ _PA_TERMINOLOGY_ZH = """
 英文缩写（可保留）：SB/EB、OB/IB、H1/H2、L1/L2、MTR、AIL/AIS、20GB。
 """.strip()
 
+_OPENCLAW_AGENT_NO_TOOLS_RULE = """
+## PA Agent × QClaw 任务模式（硬约束）
+
+你正在接收 **PA Agent 程序化 K 线分析**请求，不是通用编程/运维助手会话。
+
+**禁止调用任何工具**，包括但不限于：`exec`、运行 Python/shell、读/写/编辑文件、浏览器、联网搜索、在 `~/.qclaw/workspace` 写中间 `.md`/`.json` 等。
+
+- K 线表、EMA/ATR、几何特征、阶段一诊断（若有）**已全部在用户消息中给出**；禁止再拉数据或读盘。
+- 风险点数、盈亏比、交易者方程、胜率估算等**一律在思考过程或 JSON 字段内心算**；禁止为 `risk=stop-entry` 之类简单算术启动解释器。
+- **唯一交付物**：assistant 正文 `content` 中的裸 JSON（阶段一或阶段二 schema）。不得在磁盘上留档后再回复。
+
+违反会导致分析极慢、工具刷屏，且程序无法解析你的输出。
+""".strip()
+
 _THINKING_CONTENT_OUTPUT_RULE = """
 ## 思考与正式输出分离（硬约束，违反则程序判定失败）
 
@@ -80,6 +94,7 @@ _THINKING_CONTENT_OUTPUT_RULE = """
 _STAGE1_TAIL_REMINDER = (
     "【最后一步·必做】思考结束后，立即在 assistant 正文 `content` 输出完整阶段一裸 JSON。"
     "思考请用简体中文并尽量简洁；`content` 不得为空。"
+    "禁止调用 exec/Python/写文件等工具。\n"
     "若 token 紧张：可缩短思考、将 bar_by_bar_summary 缩至 8 根，"
     "但 gate_trace 与 gate_result 必须写在 JSON 末尾且不可省略。"
 ).strip()
@@ -101,6 +116,7 @@ _INCREMENTAL_OUTPUT_HARD_RULES = """
 _STAGE2_TAIL_REMINDER = (
     "【最后一步·必做】思考结束后，立即在 assistant 正文 `content` 输出完整阶段二裸 JSON"
     "（含 decision、decision_trace、terminal）。思考用简体中文并尽量简洁；`content` 不得为空。"
+    "禁止调用 exec/Python/写文件等工具；算术在 JSON 推理字段内完成。\n"
     "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。\n"
     "⚠️ 禁止在 content 中只写思考过程或分隔符（如 ---输出JSON---）而不附 JSON——"
     "这会导致校验直接失败。哪怕只输出最小骨架 {\"decision\":{\"order_type\":\"不下单\",...}} 也比没有强。\n\n"
@@ -278,7 +294,7 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 ```json
 {
   "decision": {
-    "order_direction": "做多|做空|null",
+    "order_direction": "做多|做空|null（禁止写 bearish/bullish/short/long）",
     "order_type": "限价单|突破单|市价单|不下单",
     "entry_price": null,
     "entry_basis_bar": null,
@@ -801,13 +817,23 @@ class PromptAssembler:
 
     def _build_stage1_system_prompt_inner(self) -> str:
         """Stage 1 system: persona + gate-only decision tree (§0–§2)."""
-        system_parts = [_LANGUAGE_ZH_RULE, _PA_TERMINOLOGY_ZH, _THINKING_CONTENT_OUTPUT_RULE]
+        system_parts = [
+            _LANGUAGE_ZH_RULE,
+            _PA_TERMINOLOGY_ZH,
+            _OPENCLAW_AGENT_NO_TOOLS_RULE,
+            _THINKING_CONTENT_OUTPUT_RULE,
+        ]
         system_parts.extend(self._load(name) for name in COMMON_SYSTEM_STAGE1_TXT_FILES)
         return "\n\n---\n\n".join(p for p in system_parts if p)
 
     def _build_stage2_system_prompt_inner(self) -> str:
         """Stage 2 system: persona + full decision tree."""
-        system_parts = [_LANGUAGE_ZH_RULE, _PA_TERMINOLOGY_ZH, _THINKING_CONTENT_OUTPUT_RULE]
+        system_parts = [
+            _LANGUAGE_ZH_RULE,
+            _PA_TERMINOLOGY_ZH,
+            _OPENCLAW_AGENT_NO_TOOLS_RULE,
+            _THINKING_CONTENT_OUTPUT_RULE,
+        ]
         system_parts.extend(self._load(name) for name in COMMON_SYSTEM_STAGE2_TXT_FILES)
         return "\n\n---\n\n".join(p for p in system_parts if p)
 

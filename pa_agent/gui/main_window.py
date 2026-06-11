@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QShowEvent
+from PyQt6.QtGui import QAction, QCloseEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,6 +33,18 @@ logger = logging.getLogger(__name__)
 
 # Zombie timeout in milliseconds (5 seconds)
 _WORKER_JOIN_TIMEOUT_MS = 5000
+
+
+def _qobject_alive(obj: QObject | None) -> bool:
+    """Return False when the underlying Qt C++ object has been destroyed."""
+    if obj is None:
+        return False
+    try:
+        from PyQt6 import sip
+
+        return not sip.isdeleted(obj)
+    except (ImportError, RuntimeError, TypeError):
+        return True
 
 
 def _parse_sr_price(raw: object) -> float | None:
@@ -191,7 +203,9 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self._ctx = ctx
         self._worker: _AnalysisWorker | None = None
+        self._analysis_worker_id: object | None = None
         self._cancel_token: Any = None
+        self._window_closing = False
         self._analysis_in_progress = False
         self._last_analysis_had_error = False
         self._switching = False
@@ -723,6 +737,27 @@ class MainWindow(QMainWindow):
         self._refresh_loop = None
         self._refresh_cancel_token = None
 
+    def _ui_is_alive(self) -> bool:
+        """True while MainWindow (and its widgets) can still be touched from slots."""
+        if getattr(self, "_window_closing", False):
+            return False
+        return _qobject_alive(self)
+
+    def _cancel_analysis_worker(self) -> None:
+        """Cancel the AI worker and invalidate any pending finished callbacks."""
+        self._analysis_worker_id = None
+        if self._cancel_token is not None:
+            self._cancel_token.set()
+        worker = self._worker
+        self._worker = None
+        if worker is not None and worker.isRunning():
+            worker.wait(_WORKER_JOIN_TIMEOUT_MS)
+            if worker.isRunning():
+                logger.warning(
+                    "Analysis worker did not finish within %d ms after cancel",
+                    _WORKER_JOIN_TIMEOUT_MS,
+                )
+
     def _cancel_snapshot_fetch_worker(self) -> None:
         """Cancel any running SnapshotFetchWorker and nullify its reference.
 
@@ -1028,13 +1063,10 @@ class MainWindow(QMainWindow):
             return
         self._switching = True
         try:
-            if self._worker is not None and self._worker.isRunning():
-                if self._cancel_token is not None:
-                    self._cancel_token.set()
-                self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
-                self._worker = None
+            self._cancel_analysis_worker()
             self._analysis_in_progress = False
-            self._update_submit_button_state()
+            if self._ui_is_alive():
+                self._update_submit_button_state()
 
             self._stop_refresh_loop()
             self._disconnect_data_source(getattr(self._ctx, "data_source", None))
@@ -1203,6 +1235,8 @@ class MainWindow(QMainWindow):
 
     def _on_status_update(self, text: str) -> None:
         """Update the status bar with subscription / analysis / data-delay text."""
+        if not self._ui_is_alive():
+            return
         if not text:
             # Empty string means data fetch recovered — clear any previous error.
             if not self._analysis_in_progress:
@@ -2538,11 +2572,7 @@ class MainWindow(QMainWindow):
         self._auto_incremental_pending = False
 
         # Cancel any existing worker before starting a new one
-        if self._worker is not None and self._worker.isRunning():
-            if self._cancel_token is not None:
-                self._cancel_token.set()
-            self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
-            self._worker = None
+        self._cancel_analysis_worker()
 
         symbol = self._symbol_combo.currentText().strip()
         timeframe = self._tf_combo.currentText()
@@ -2630,6 +2660,8 @@ class MainWindow(QMainWindow):
         def _on_bars(bars: list) -> None:
             if getattr(self, "_snapshot_fetch_id", None) is not fetch_id:
                 return  # stale fetch — ignore
+            if not _qobject_alive(self):
+                return
             self._snapshot_fetch_worker = None
             if not self._bars_sufficient_for_analysis(bars, bar_count):
                 self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
@@ -2646,6 +2678,8 @@ class MainWindow(QMainWindow):
         def _on_fail(msg: str) -> None:
             if getattr(self, "_snapshot_fetch_id", None) is not fetch_id:
                 return  # stale fetch — ignore
+            if not _qobject_alive(self):
+                return
             self._snapshot_fetch_worker = None
             self._status_bar.showMessage(msg or "获取K线失败")
 
@@ -2723,6 +2757,8 @@ class MainWindow(QMainWindow):
         from pa_agent.util.threading import CancelToken
 
         self._cancel_token = CancelToken()
+        worker_id = object()
+        self._analysis_worker_id = worker_id
 
         # Start worker in its own QThread (worker IS a QThread subclass)
         self._worker = _AnalysisWorker(
@@ -2733,12 +2769,19 @@ class MainWindow(QMainWindow):
             incremental_new_bar_count=incremental_new_bar_count,
             parent=None,
         )
-        self._worker.finished.connect(self._on_analysis_finished)
+        def _on_worker_finished(decision: dict) -> None:
+            if getattr(self, "_analysis_worker_id", None) is not worker_id:
+                return
+            if not _qobject_alive(self):
+                return
+            self._on_analysis_finished(decision)
+            self._on_worker_done()
+
+        self._worker.finished.connect(_on_worker_finished)
         self._worker.record_ready.connect(self._on_record_ready)
         self._worker.error_occurred.connect(self._on_analysis_error)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.retry_occurred.connect(self._on_retry_occurred)
-        self._worker.finished.connect(lambda _: self._on_worker_done())
 
         panel = getattr(self, "_stream_panel", None)
         if panel is not None:
@@ -2926,6 +2969,8 @@ class MainWindow(QMainWindow):
         "diagnosis_summary": {...}}``).  The chart and panel widgets expect
         the inner ``decision`` sub-dict, so we extract it here.
         """
+        if not self._ui_is_alive():
+            return
         if decision:
             from pa_agent.gui.stage2_payload import prepare_stage2_for_ui
 
@@ -3193,6 +3238,8 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_error(self, message: str) -> None:
         """Unhandled exception in the analysis worker thread."""
+        if not self._ui_is_alive():
+            return
         self._last_analysis_had_error = True
         debug = getattr(self, "_debug_widget", None)
         if debug is not None:
@@ -3207,6 +3254,8 @@ class MainWindow(QMainWindow):
 
     def _on_retry_occurred(self, stage: str) -> None:
         """Handle retry event: if cancel_keep_analysis_on_retry is enabled, disable keep_analysis."""
+        if not self._ui_is_alive():
+            return
         settings = getattr(self._ctx, "settings", None)
         if settings is None:
             return
@@ -3233,6 +3282,8 @@ class MainWindow(QMainWindow):
 
     def _on_record_ready(self, record: Any) -> None:
         """Push the full AnalysisRecord to the conversation and debug tabs."""
+        if not self._ui_is_alive():
+            return
         import json as _json
 
         exc_info = getattr(record, "exception", None)
@@ -3559,39 +3610,52 @@ class MainWindow(QMainWindow):
 
     def _on_worker_done(self) -> None:
         """Reset in-progress flag and re-enable the submit button."""
-        self._analysis_in_progress = False
-        self._auto_incremental_pending = False
-        self._worker = None
+        if not self._ui_is_alive():
+            return
         try:
+            self._analysis_in_progress = False
+            self._auto_incremental_pending = False
+            self._worker = None
             self._update_submit_button_state()
+
+            # Reap any zombie RefreshLoops that finished while we were busy
+            self._reap_zombie_loops()
+
+            # 分析结束后刷新持续跟踪分析哨兵，防止因分析期间新K线收盘而立即再次触发
+            self._refresh_keep_analysis_sentinel()
+
+            # Keep-analysis mode must always resume the chart so the next tick of
+            # RefreshLoop can deliver bars and detect the next bar close.
+            keep_analysis_on = (
+                getattr(self, "_keep_analysis_checkbox", None) is not None
+                and self._keep_analysis_checkbox.isChecked()
+            )
+            if keep_analysis_on and self._chart_refresh_paused:
+                self._set_chart_refresh_paused(False)
+
+            auto_resumed = self._maybe_auto_resume_chart_after_analysis()
+            if self._last_analysis_had_error:
+                msg = "分析结束（存在错误，请查看「原始」页调试信息）"
+                if auto_resumed:
+                    msg += "；图表已恢复实时更新"
+            elif auto_resumed:
+                msg = "分析完成，图表已恢复实时更新"
+            else:
+                msg = "分析完成"
+            self._status_bar.showMessage(msg)
         except RuntimeError as exc:
-            logger.warning("_update_submit_button_state after worker done failed: %s", exc)
+            logger.debug("MainWindow UI torn down during worker cleanup: %s", exc)
 
-        # Reap any zombie RefreshLoops that finished while we were busy
-        self._reap_zombie_loops()
-
-        # 分析结束后刷新持续跟踪分析哨兵，防止因分析期间新K线收盘而立即再次触发
-        self._refresh_keep_analysis_sentinel()
-
-        # Keep-analysis mode must always resume the chart so the next tick of
-        # RefreshLoop can deliver bars and detect the next bar close.
-        keep_analysis_on = (
-            getattr(self, "_keep_analysis_checkbox", None) is not None
-            and self._keep_analysis_checkbox.isChecked()
-        )
-        if keep_analysis_on and self._chart_refresh_paused:
-            self._set_chart_refresh_paused(False)
-
-        auto_resumed = self._maybe_auto_resume_chart_after_analysis()
-        if self._last_analysis_had_error:
-            msg = "分析结束（存在错误，请查看「原始」页调试信息）"
-            if auto_resumed:
-                msg += "；图表已恢复实时更新"
-        elif auto_resumed:
-            msg = "分析完成，图表已恢复实时更新"
-        else:
-            msg = "分析完成"
-        self._status_bar.showMessage(msg)
+    def closeEvent(self, event: QCloseEvent | None) -> None:
+        """Stop background work before Qt destroys widgets."""
+        self._window_closing = True
+        try:
+            self._cancel_analysis_worker()
+            self._cancel_snapshot_fetch_worker()
+            self._stop_refresh_loop()
+        except RuntimeError as exc:
+            logger.debug("Shutdown cleanup skipped: %s", exc)
+        super().closeEvent(event)
 
     def showEvent(self, event: QShowEvent | None) -> None:
         """On first show, prompt for API Key when missing."""
@@ -3603,7 +3667,6 @@ class MainWindow(QMainWindow):
         if not self._startup_tv_connectivity_check_done:
             self._startup_tv_connectivity_check_done = True
             QTimer.singleShot(0, self._on_startup_tv_connectivity_check)
-
     def _on_startup_tv_connectivity_check(self) -> None:
         if self._current_data_source_kind() != "tradingview":
             return

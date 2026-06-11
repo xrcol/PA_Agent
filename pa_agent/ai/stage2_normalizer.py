@@ -30,6 +30,43 @@ _SIGNAL_BAR_QUALITY_ALIASES: dict[str, str] = {
     "无效": "invalid",
 }
 
+_ORDER_DIRECTION_ALIASES: dict[str, str] = {
+    "bearish": "做空",
+    "bullish": "做多",
+    "short": "做空",
+    "long": "做多",
+    "sell": "做空",
+    "buy": "做多",
+    "空头": "做空",
+    "多头": "做多",
+    "做空": "做空",
+    "做多": "做多",
+}
+
+_ENTRY_BAR_STRENGTH_ALIASES: dict[str, str] = {
+    "pending": "not_triggered",
+    "waiting": "not_triggered",
+    "triggered": "strong",
+    "not_triggered": "not_triggered",
+    "strong": "strong",
+    "weak": "weak",
+}
+
+_TERMINAL_OUTCOME_ALIASES: dict[str, str] = {
+    "breakout_entry": "trade",
+    "breakout": "trade",
+    "limit_entry": "trade",
+    "market_entry": "trade",
+    "entry": "trade",
+    "trade_entry": "trade",
+    "no_trade": "wait",
+    "no_order": "wait",
+    "wait": "wait",
+    "reject": "reject",
+    "trade": "trade",
+    "proceed": "proceed",
+}
+
 _ENTRY_BAR_FRESHNESS_ALIASES: dict[str, str] = {
     "expired": "stale",
     "old": "stale",
@@ -67,6 +104,131 @@ _VALID_FEATURES_USED = frozenset({
     "stage2_decision",
     "previous_prediction_summary",
 })
+
+
+def _normalize_order_direction_value(raw: object) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text in ("做多", "做空"):
+        return text
+    return _ORDER_DIRECTION_ALIASES.get(text.lower())
+
+
+def _normalize_always_in_value(
+    raw: object,
+    *,
+    diagnosis_direction: str | None = None,
+) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    key = text.lower().replace(" ", "")
+    if key in ("long", "short", "neutral"):
+        return key
+    if "失效" in text or "invalid" in key or key in ("none", "n/a", "na"):
+        return "neutral"
+    if "ais" in key or "空头" in text:
+        return "short"
+    if "ail" in key or "多头" in text:
+        return "long"
+    if "bear" in key:
+        return "short"
+    if "bull" in key:
+        return "long"
+    if "中性" in text or key == "neutral":
+        return "neutral"
+    if diagnosis_direction == "bearish":
+        return "short"
+    if diagnosis_direction == "bullish":
+        return "long"
+    return None
+
+
+def _normalize_terminal_outcome_value(
+    raw: object,
+    *,
+    order_type: str | None = None,
+) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    key = text.lower().replace(" ", "_")
+    mapped = _TERMINAL_OUTCOME_ALIASES.get(key)
+    if mapped:
+        if order_type == "不下单" and mapped == "trade":
+            return "wait"
+        return mapped
+    if key in ("wait", "reject", "trade", "proceed"):
+        return key
+    return None
+
+
+def _normalize_stage2_enum_aliases(out: dict[str, Any]) -> bool:
+    """Map common OpenClaw/Agent enum slips before schema validation."""
+    changed = False
+    diag = out.get("diagnosis_summary")
+    diag_direction = (
+        str(diag.get("direction", "")).strip()
+        if isinstance(diag, dict)
+        else ""
+    ) or None
+
+    decision = out.get("decision")
+    order_type = (
+        str(decision.get("order_type", "")).strip()
+        if isinstance(decision, dict)
+        else None
+    ) or None
+    if isinstance(decision, dict):
+        raw_dir = decision.get("order_direction")
+        mapped_dir = _normalize_order_direction_value(raw_dir)
+        if mapped_dir and mapped_dir != raw_dir:
+            decision["order_direction"] = mapped_dir
+            logger.debug("order_direction %r -> %r", raw_dir, mapped_dir)
+            changed = True
+
+    bar_analysis = out.get("bar_analysis")
+    if isinstance(bar_analysis, dict):
+        raw_ai = bar_analysis.get("always_in")
+        mapped_ai = _normalize_always_in_value(
+            raw_ai, diagnosis_direction=diag_direction
+        )
+        if mapped_ai and mapped_ai != raw_ai:
+            bar_analysis["always_in"] = mapped_ai
+            logger.debug("always_in %r -> %r", raw_ai, mapped_ai)
+            changed = True
+
+        entry_bar = bar_analysis.get("entry_bar")
+        if isinstance(entry_bar, dict):
+            raw_strength = entry_bar.get("strength")
+            if isinstance(raw_strength, str):
+                mapped_strength = _ENTRY_BAR_STRENGTH_ALIASES.get(
+                    raw_strength.strip().lower()
+                )
+                if mapped_strength and mapped_strength != raw_strength:
+                    entry_bar["strength"] = mapped_strength
+                    logger.debug("entry_bar.strength %r -> %r", raw_strength, mapped_strength)
+                    changed = True
+
+    terminal = out.get("terminal")
+    if isinstance(terminal, dict):
+        raw_outcome = terminal.get("outcome")
+        mapped_outcome = _normalize_terminal_outcome_value(
+            raw_outcome, order_type=order_type
+        )
+        if mapped_outcome and mapped_outcome != raw_outcome:
+            terminal["outcome"] = mapped_outcome
+            logger.debug("terminal.outcome %r -> %r", raw_outcome, mapped_outcome)
+            changed = True
+
+    return changed
 
 
 def _trace_node_answer(trace: Any, node_id: str) -> str | None:
@@ -598,6 +760,7 @@ def normalize_stage2(
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
     frame_max = _max_bar_seq_from_frame(kline_frame)
+    _normalize_stage2_enum_aliases(out)
     _coerce_decision_no_order(out)
     decision = out.get("decision")
     if isinstance(decision, dict) and normalize_breakout_basis_extreme(decision):
